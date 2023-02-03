@@ -15,6 +15,19 @@ def clamp(value, min, max):
 
     return value
 
+class LogLevel:
+    Debug = 2
+    Warn  = 1
+    Error = 0
+
+verboseLevel:int = LogLevel.Debug
+
+def log(msg, logLevel = LogLevel.Debug):
+    global verboseLevel
+
+    if(logLevel >= verboseLevel):
+        print(msg)
+
 # NOTE: Colors are in BGR to align with opencv
 class Color:
     
@@ -117,12 +130,18 @@ class Touchpad:
 
         self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 720)
         self.camera.set(cv.CAP_PROP_FRAME_WIDTH, 1280)
-        self.camera.set(cv.CAP_PROP_ISO_SPEED, 200)
+
+        # self.camera.set(cv.CAP_PROP_ISO_SPEED, 0)
+        # self.camera.set(cv.CAP_PROP_SPEED, 200)
         # self.camera.set(cv.CAP_PROP_FPS, 30)
         # self.camera.set(cv.CAP_PROP_AUTO_WB, 0)
+
+        # self.setCameraProp(cv.CAP_PROP_AUTO_EXPOSURE, 0)
+        self.setCameraProp(cv.CAP_PROP_EXPOSURE, -9)
+        self.setCameraProp(cv.CAP_PROP_BRIGHTNESS, 255)
+
         # self.camera.set(cv.CAP_PROP_AUTO_EXPOSURE, 0)
         # self.camera.set(cv.CAP_PROP_MONOCHROME, 0)
-        # self.camera.set(cv.CAP_PROP_BRIGHTNESS, 255)
 
         print(self.getCameraInfo())
 
@@ -130,13 +149,13 @@ class Touchpad:
 
         # Configure filters
         # TODO: Make theseSldiers?
-        self.ellipseIterations = 1
-        self.ellipseKernelSize = (20, 20)
+        self.ellipseIterations = 2
+        self.ellipseKernelSize = (10, 10)
         self.ellipseKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, self.ellipseKernelSize)
 
-        self.denoiseIterations = 1
-        self.denoiseKernelSize = (1, 1)
-        self.denoiseKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, self.ellipseKernelSize)
+        self.denoiseIterations = 3
+        self.denoiseKernelSize = (5, 5)
+        self.denoiseKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, self.denoiseKernelSize)
 
         # create windows
         self.windowName = windowName if windowName is not None else f"Touchpad: {cameraPort}"
@@ -145,9 +164,10 @@ class Touchpad:
         cv.namedWindow(self.propertiesWindowsName, cv.WINDOW_AUTOSIZE)
 
         # create sliders
-        targetRGB = np.uint8([[[250, 237, 255 ]]])
+        targetRGB = np.uint8([[[210, 203, 227 ]]])
         self.targetHSVColor = cv.cvtColor( np.uint8(targetRGB),cv.COLOR_RGB2HSV).reshape(3)
-        self.targetHSVTolerance = [50, 150, 150]
+        self.targetHSVTolerance = [100, 100, 140]
+        # self.targetHSVTolerance = [50, 50, 50]
 
         self.hSlider = MinMaxSlider("h", self.propertiesWindowsName, 
             defaultMinValue = clamp(self.targetHSVColor[0] - self.targetHSVTolerance[0], 0, 255), 
@@ -164,6 +184,23 @@ class Touchpad:
             defaultMaxValue = clamp(self.targetHSVColor[2] + self.targetHSVTolerance[2], 0, 255)
         )
 
+    def setCameraProp(self, property:int, value:int):
+
+        # Note: Hack to get camera properties to apply
+        #       self.camera.get doesn't report properties correctly
+        #       from experimentation camera properties only apply themselves
+        #       if there is a change from the value they are currently set to
+        self.camera.set(property, value-1)
+        self.camera.read()
+        cv.waitKey(5)
+        
+        self.camera.set(property, value)
+        self.camera.read()
+        cv.waitKey(5)
+        
+        # while(self.camera.get(property) != value):
+
+
     def __bool__(self):
         return cv.getWindowProperty(self.windowName, cv.WND_PROP_VISIBLE) == 1 and \
                cv.getWindowProperty(self.propertiesWindowsName, cv.WND_PROP_VISIBLE) == 1
@@ -174,7 +211,6 @@ class Touchpad:
             "CAP_PROP_AUTOFOCUS",
             "CAP_PROP_AUTO_EXPOSURE",
             "CAP_PROP_AUTO_WB",
-            "CAP_PROP_BACKEND",
             "CAP_PROP_BACKLIGHT",
             "CAP_PROP_BITRATE",
             "CAP_PROP_BRIGHTNESS",
@@ -290,17 +326,18 @@ class Touchpad:
 
     def getMask(self, image, colorLower, colorUpper):        
 
-        boundedImage = cv.inRange(image, colorLower, colorUpper)
-
         # Note: OPEN is erosion followed by dilation (AKA standard denoise)
-        denoisedImage = cv.morphologyEx(boundedImage, cv.MORPH_OPEN, self.denoiseKernel, iterations=self.denoiseIterations)
+        denoisedImage = cv.morphologyEx(image, cv.MORPH_OPEN, self.denoiseKernel, iterations=self.denoiseIterations)
+        self.renderImages.append(NamedImage("Denoised", denoisedImage))
 
         # Note: closing is dilation followed by erosion
         closedImage = cv.morphologyEx(denoisedImage, cv.MORPH_CLOSE, self.denoiseKernel, iterations=self.denoiseIterations)
+        self.renderImages.append(NamedImage("Closed", closedImage))
 
-        return closedImage
+        boundedImage = cv.inRange(closedImage, colorLower, colorUpper)
+
+        return boundedImage
         
-
     def fitEllipse(self, namedImage:NamedImage):
         
         hsvImage = cv.cvtColor(namedImage.pixels, cv.COLOR_BGR2HSV)
@@ -309,40 +346,66 @@ class Touchpad:
         hsvMask = self.getMask(hsvImage, self.getMinHSV(), self.getMaxHSV())
         self.renderImages.append(NamedImage("MASK", hsvMask))
 
-        dilatedEllipse = cv.dilate(hsvMask , self.ellipseKernel, self.ellipseIterations)
-        self.renderImages.append(NamedImage("DIALATED", dilatedEllipse))
+        # Preform a gradient on the mask to form 'rings' around fingers
+        gradientEllipse = cv.morphologyEx(hsvMask, cv.MORPH_GRADIENT, self.ellipseKernel, self.ellipseIterations)
+        self.renderImages.append(NamedImage("GRADIENT", gradientEllipse))
+    
+        contours, hierarchies = cv.findContours(gradientEllipse, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+        if hierarchies is None:
+            return
 
-        contours, hierarchy = cv.findContours(dilatedEllipse, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
-
-        minArea = 2000
+        # TODO: Make these sliders!
+        minArea = 1000
         maxArea = 30000
-        minRadius = 20
-        maxRadius = 300
-        minRadiusDelta = 0
-        maxRadiusDelta = maxRadius
+        minDiameter = 20
+        maxDiameter = 300
+        maxRadiusAspect = 2
+        maxNormalizedEllipseError = .20
 
-        for contour in contours:
+        # Draw all contours in red (we'll draw over the good ones with green below)
+        cv.drawContours(namedImage.pixels, contours, -1, color=Color.red)
+
+        for contour, hierarchy in zip(contours, hierarchies[0]):
+
+            nextContour, prevContour, childContour, parentContour = hierarchy
+
+            # we only care about holes
+            if childContour != -1:
+                continue
 
             # Note: opencv requires at least 5 vertices to fit ellipse
             if len(contour) < 5:
                 continue
 
-            area = cv.contourArea(contour)
-            if not inRange(area, minArea, maxArea):
+            # Ignore obvious small or giant splotches
+            contourArea = cv.contourArea(contour)
+            if not inRange(contourArea, minArea, maxArea):
                 continue 
         
             ellipse = cv.fitEllipse(contour)
             (xc,yc), (d1,d2), angle = ellipse
-            
-            if not (inRange(d1, minRadius, maxRadius) and 
-                    inRange(d2, minRadius, maxRadius) and 
-                    inRange(np.abs(d2 - d1), minRadiusDelta, maxRadiusDelta)):
+
+            # Make sure the ellipse isn't to small/big/stretched 
+            if not (inRange(d1, minDiameter, maxDiameter) and 
+                    inRange(d2, minDiameter, maxDiameter) and 
+                    inRange(np.abs(d1/d2), 1/maxRadiusAspect, maxRadiusAspect)):
                 continue 
 
+            # Make sure the fit ellipse is actually approximates a decent ellipse
+            # Note: ellipse area is pi*r1*r2
+            ellipseArea = math.pi*d1*d2/4
+            normalizedEllipseError = (ellipseArea - contourArea) / ellipseArea            
+
+            if abs(normalizedEllipseError) > maxNormalizedEllipseError:
+                log(f"IGNORING - normalizedEllipseError: {normalizedEllipseError} | ellipseArea: {ellipseArea} | contourArea: {contourArea}")
+                continue
+
+            # Bingo - we got a finger!
             cv.ellipse(namedImage.pixels, ellipse, Color.green, 2)        
             namedImage.drawText(f"[{np.round(xc, 2)}, {np.round(yc, 2)}]", (xc, yc))
 
-            # TODO: Write out
+            # TODO: Write out textFile
+            log(f"FINGER: diameter: [{d1}, {d2}] | AspectRatio: {np.abs(d1/d2)}")
 
 
 def main():
