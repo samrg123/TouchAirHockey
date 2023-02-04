@@ -1,4 +1,6 @@
+import argparse
 import math
+import os
 import sys
 import cv2 as cv
 import numpy as np
@@ -15,6 +17,9 @@ def clamp(value, min, max):
 
     return value
 
+def normalize(x, minX, maxX, normalizeMin = 0, normalizeMax = 1):
+    return (x / (maxX - minX)) * (normalizeMax - normalizeMin) + normalizeMin
+
 class LogLevel:
     Debug = 2
     Warn  = 1
@@ -25,7 +30,7 @@ verboseLevel:int = LogLevel.Debug
 def log(msg, logLevel = LogLevel.Debug):
     global verboseLevel
 
-    if(logLevel >= verboseLevel):
+    if(verboseLevel >= logLevel):
         print(msg)
 
 # NOTE: Colors are in BGR to align with opencv
@@ -120,16 +125,31 @@ class MinMaxSlider:
     def getMaxValue(self):
         return self.maxSlider.getValue()        
 
+class Finger:
+    def __init__(self, x, y, d1, d2) -> None:
+        self.x = x
+        self.y = y
+        self.d1 = d1
+        self.d2 = d2
+
+    def __str__(self) -> str:
+        return f"x: {self.x} y: {self.y} d1: {self.d1} d2: {self.d2}"
 class Touchpad:
 
-    def __init__(self, cameraPort:int, windowName:str=None) -> None:
+    def __init__(self, cameraPort:int, windowName:str=None, outputFilePath="touchpad.out") -> None:
+
+        # setup tmp output files
+        self.outputFilePath = os.path.abspath(outputFilePath)        
+        self.tmpOutputFilePath = self.outputFilePath+".tmp"
 
         # Configure Camera
         self.camera_port = cameraPort
         self.camera = cv.VideoCapture(cameraPort)
 
-        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 720)
-        self.camera.set(cv.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cameraHeight = 720
+        self.cameraWidth  = 1280
+        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.cameraHeight)
+        self.camera.set(cv.CAP_PROP_FRAME_WIDTH, self.cameraWidth)
 
         # self.camera.set(cv.CAP_PROP_ISO_SPEED, 0)
         # self.camera.set(cv.CAP_PROP_SPEED, 200)
@@ -137,7 +157,7 @@ class Touchpad:
         # self.camera.set(cv.CAP_PROP_AUTO_WB, 0)
 
         # self.setCameraProp(cv.CAP_PROP_AUTO_EXPOSURE, 0)
-        self.setCameraProp(cv.CAP_PROP_EXPOSURE, -9)
+        self.setCameraProp(cv.CAP_PROP_EXPOSURE, -7)
         self.setCameraProp(cv.CAP_PROP_BRIGHTNESS, 255)
 
         # self.camera.set(cv.CAP_PROP_AUTO_EXPOSURE, 0)
@@ -145,12 +165,14 @@ class Touchpad:
 
         print(self.getCameraInfo())
 
+        self.frameId = 0
         self.renderImages:list[NamedImage] = []
+        self.fingers:list[Finger] = []
 
         # Configure filters
         # TODO: Make theseSldiers?
         self.ellipseIterations = 2
-        self.ellipseKernelSize = (10, 10)
+        self.ellipseKernelSize = (5, 5)
         self.ellipseKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, self.ellipseKernelSize)
 
         self.denoiseIterations = 3
@@ -183,7 +205,7 @@ class Touchpad:
             defaultMinValue = clamp(self.targetHSVColor[2] - self.targetHSVTolerance[2], 0, 255), 
             defaultMaxValue = clamp(self.targetHSVColor[2] + self.targetHSVTolerance[2], 0, 255)
         )
-
+        
     def setCameraProp(self, property:int, value:int):
 
         # Note: Hack to get camera properties to apply
@@ -192,11 +214,11 @@ class Touchpad:
         #       if there is a change from the value they are currently set to
         self.camera.set(property, value-1)
         self.camera.read()
-        cv.waitKey(5)
+        cv.waitKey(100)
         
         self.camera.set(property, value)
         self.camera.read()
-        cv.waitKey(5)
+        cv.waitKey(100)
         
         # while(self.camera.get(property) != value):
 
@@ -314,16 +336,44 @@ class Touchpad:
 
     def update(self):
         
+        # clear out last frame
+        self.fingers.clear()
         self.renderImages.clear()
 
+        self.frameId+= 1 
         _, rawFrame = self.camera.read()
         
         rawImage = NamedImage("Raw", rawFrame)
         self.renderImages.append(rawImage)
         
+        # TODO: Rename this to something better
         self.fitEllipse(rawImage)
         
+        self.publishFingers()
 
+    def publishFingers(self):
+
+        # write output to tmpFile
+        frameStr = f"frameId: {self.frameId} "
+        with open(self.tmpOutputFilePath, "w") as tmpFile:
+            for finger in self.fingers:
+                tmpFile.write(frameStr + str(finger)+"\n")
+
+            tmpFile.flush()
+            os.fsync(tmpFile.fileno())
+
+        # Atomic move tmp file to output file
+        maxPublishAttempts = 10
+        publishAttemptDelay = 10
+        for i in range(0, maxPublishAttempts):
+            try:
+                os.replace(self.tmpOutputFilePath, self.outputFilePath)
+                break
+            except Exception as e:
+                log(f"Failed to publish fingers on attempt {i+1}/{maxPublishAttempts}", LogLevel.Warn)
+                cv.waitKey(publishAttemptDelay)
+        
+        
     def getMask(self, image, colorLower, colorUpper):        
 
         # Note: OPEN is erosion followed by dilation (AKA standard denoise)
@@ -355,12 +405,12 @@ class Touchpad:
             return
 
         # TODO: Make these sliders!
-        minArea = 1000
-        maxArea = 30000
-        minDiameter = 20
+        minArea = 200
+        maxArea = 3000
+        minDiameter = 5
         maxDiameter = 300
-        maxRadiusAspect = 2
-        maxNormalizedEllipseError = .20
+        maxRadiusAspect = 3
+        maxNormalizedEllipseError = .30
 
         # Draw all contours in red (we'll draw over the good ones with green below)
         cv.drawContours(namedImage.pixels, contours, -1, color=Color.red)
@@ -385,11 +435,15 @@ class Touchpad:
             ellipse = cv.fitEllipse(contour)
             (xc,yc), (d1,d2), angle = ellipse
 
-            # Make sure the ellipse isn't to small/big/stretched 
+            # Make sure the ellipse isn't to small/big 
             if not (inRange(d1, minDiameter, maxDiameter) and 
-                    inRange(d2, minDiameter, maxDiameter) and 
-                    inRange(np.abs(d1/d2), 1/maxRadiusAspect, maxRadiusAspect)):
+                    inRange(d2, minDiameter, maxDiameter)):
                 continue 
+
+            # Make sure the ellipse isn't to stretched 
+            aspectRatio = np.abs(d1/d2)
+            if not inRange(aspectRatio, 1/maxRadiusAspect, maxRadiusAspect):
+                continue
 
             # Make sure the fit ellipse is actually approximates a decent ellipse
             # Note: ellipse area is pi*r1*r2
@@ -405,12 +459,35 @@ class Touchpad:
             namedImage.drawText(f"[{np.round(xc, 2)}, {np.round(yc, 2)}]", (xc, yc))
 
             # TODO: Write out textFile
-            log(f"FINGER: diameter: [{d1}, {d2}] | AspectRatio: {np.abs(d1/d2)}")
+            normalizedX = normalize(xc, 0, self.cameraWidth, -1, 1)
+            normalizedY = normalize(yc, 0, self.cameraHeight, -1, 1)
+            self.fingers.append(Finger(normalizedX, normalizedY, d1, d2))
+            log(f"FINGER: diameter: [{d1}, {d2}] | AspectRatio: {aspectRatio} | contourArea: {contourArea} | ellipseArea: {ellipseArea} | error: {normalizedEllipseError}")
 
 
 def main():
 
-    touchpad = Touchpad(2)
+    argParser = argparse.ArgumentParser(
+        prog = "Touchpad",
+        description ="Driver for EECS 598 IR Touchpad",
+    )
+
+    argParser.add_argument("-p", "--port", metavar="n", action="store", default=0, required=False, help="IR Camera port number")
+    argParser.add_argument("-o", "--output", metavar="path", action="store", default="touchpad.out", required=False, help="Output filepath to write finger positions to")
+    argParser.add_argument("-v", "--verbose", metavar="path", action="store", default="0", required=False, help="Sets the verbose level (higher means more logging)")
+
+    args = argParser.parse_args()
+    
+    global verboseLevel
+    verboseLevel = int(args.verbose)
+
+    log(f"Touchpad: [\n"+
+        f"\tPort: {args.port}\n"+        
+        f"\tOutputFile: {args.output}\n"+        
+        f"]\n"
+    )
+
+    touchpad = Touchpad(cameraPort=int(args.port), windowName="Touchpad", outputFilePath=args.output)
 
     while touchpad:
         touchpad.update()
