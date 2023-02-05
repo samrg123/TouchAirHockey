@@ -1,7 +1,6 @@
 import argparse
 import math
 import os
-import sys
 import cv2 as cv
 import numpy as np
 
@@ -45,16 +44,18 @@ class Color:
 
 class Slider:
     
-    def __init__(self, name:str, window:str, minValue:int = 0, maxValue:int = 255, defaultValue:int = None) -> None:
+    def __init__(self, name:str, window:str, minValue:int = 0, maxValue:int = 255, defaultValue:int = None, onSetValue = None) -> None:
         self.name = name
         self.window = window
 
-        self.minValue = minValue
-        self.maxValue = maxValue
+        self.minValue = int(minValue)
+        self.maxValue = int(maxValue)
+        self.onSetValue = onSetValue
         
         defaultValue = minValue if defaultValue is None else defaultValue
         assert inRange(defaultValue, minValue, maxValue), f"DefaultValue: {defaultValue} is out of range: [{minValue}, {maxValue}]"
         self.setValue(defaultValue)
+
 
         cv.createTrackbar(self.name, self.window, self._value, self.maxValue, self.setValue)
 
@@ -62,7 +63,11 @@ class Slider:
         return self._value
 
     def setValue(self, value:int):
-        self._value = clamp(value, self.minValue, self.maxValue)
+
+        if self.onSetValue is not None:
+            self.onSetValue(value)
+
+        self._value = int(clamp(value, self.minValue, self.maxValue))
 
 
 class NamedImage:
@@ -116,8 +121,8 @@ class MinMaxSlider:
     def __init__(self, name:str, window:str, minValue:int = 0, maxValue:int = 255, defaultMinValue:int = None, defaultMaxValue:int = None) -> None:
         
         # TODO: Have these share the same row?
-        self.minSlider = Slider(f"{name} min", window, minValue, maxValue, defaultMinValue)        
-        self.maxSlider = Slider(f"{name} max", window, minValue, maxValue, defaultMaxValue)        
+        self.minSlider = Slider(f"{name} min\n", window, minValue, maxValue, defaultMinValue)        
+        self.maxSlider = Slider(f"{name} max\n", window, minValue, maxValue, defaultMaxValue)        
 
     def getMinValue(self):
         return self.minSlider.getValue()
@@ -135,7 +140,91 @@ class Finger:
     def __str__(self) -> str:
         return f"x: {self.x} y: {self.y} d1: {self.d1} d2: {self.d2}"
 class Touchpad:
+    
+    class RenderLevel:
+        All      = 2
+        Internal = 2
+        Debug    = 1
+        Minimal  = 0        
+    class Sliders:
+        def __init__(self, touchpad) -> None:
 
+            # Note: The original width of the window sets the width of the trackbars
+            self.sliderWidth = 400 
+            cv.resizeWindow(touchpad.propertiesWindowName, self.sliderWidth, 0)
+
+            self.hue = MinMaxSlider("hue", touchpad.propertiesWindowName, 
+                defaultMinValue = clamp(touchpad.targetHSVColor[0] - touchpad.targetHSVTolerance[0], 0, 255), 
+                defaultMaxValue = clamp(touchpad.targetHSVColor[0] + touchpad.targetHSVTolerance[0], 0, 255)
+            )
+
+            self.saturation = MinMaxSlider("sat", touchpad.propertiesWindowName, 
+                defaultMinValue = clamp(touchpad.targetHSVColor[1] - touchpad.targetHSVTolerance[1], 0, 255), 
+                defaultMaxValue = clamp(touchpad.targetHSVColor[1] + touchpad.targetHSVTolerance[1], 0, 255)
+            )
+
+            self.value = MinMaxSlider("val", touchpad.propertiesWindowName, 
+                defaultMinValue = clamp(touchpad.targetHSVColor[2] - touchpad.targetHSVTolerance[2], 0, 255), 
+                defaultMaxValue = clamp(touchpad.targetHSVColor[2] + touchpad.targetHSVTolerance[2], 0, 255)
+            )
+
+            self.area = MinMaxSlider("area", touchpad.propertiesWindowName, 
+                minValue = 100,
+                maxValue = 5000,
+                defaultMinValue = 200,
+                defaultMaxValue = 3000
+            )
+
+            self.diameter = MinMaxSlider("diam.", touchpad.propertiesWindowName, 
+                minValue = 0,
+                maxValue = 1000,
+                defaultMinValue = 5,
+                defaultMaxValue = 300
+            )
+
+            self.maxRadiusAspect = Slider("ratio max\n", touchpad.propertiesWindowName,
+                minValue = 1,
+                maxValue = 10,
+                defaultValue = 3
+            )
+
+            # Note: opencv doesn't support fractional values for sliders so we keep things as whole percents
+            self.maxNormalizedEllipseErrorPercent = Slider("error max\n", touchpad.propertiesWindowName,
+                minValue = 0,
+                maxValue = 100,
+                defaultValue = 30                               
+            )
+
+            self.brightness = Slider("bright.\n", touchpad.propertiesWindowName, 
+                minValue = 0, 
+                maxValue = 255, 
+                defaultValue = 255,
+                onSetValue = lambda newValue : touchpad.setCameraProp(cv.CAP_PROP_BRIGHTNESS, newValue)
+            )
+
+            # Note: opencv doesn't support negative value for sliders so we keep things positive 
+            self.negativeExposure = Slider("-Exposure\n", touchpad.propertiesWindowName, 
+                minValue = 0, 
+                maxValue = 11, 
+                defaultValue = 7,
+                onSetValue = lambda newValue : (
+                    touchpad.setCameraProp(cv.CAP_PROP_EXPOSURE, -newValue), 
+
+                    # don't know why, but setting exposure resets brightness so we force it back here
+                    touchpad.setCameraProp(cv.CAP_PROP_BRIGHTNESS, self.brightness.getValue())
+                )
+            )
+
+            self.renderLevel = Slider("Render\n", touchpad.propertiesWindowName,
+                minValue = touchpad.RenderLevel.Minimal,                          
+                maxValue = touchpad.RenderLevel.All,                          
+                defaultValue = touchpad.RenderLevel.Minimal                     
+            )
+
+            # Note: resize the properties window to fit two sliders side-by side (plus 25% padding)
+            cv.resizeWindow(touchpad.propertiesWindowName, int(self.sliderWidth*2.25), 0)
+
+                
     def __init__(self, cameraPort:int, windowName:str=None, outputFilePath="touchpad.out") -> None:
 
         # setup tmp output files
@@ -151,17 +240,11 @@ class Touchpad:
         self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.cameraHeight)
         self.camera.set(cv.CAP_PROP_FRAME_WIDTH, self.cameraWidth)
 
-        # self.camera.set(cv.CAP_PROP_ISO_SPEED, 0)
-        # self.camera.set(cv.CAP_PROP_SPEED, 200)
-        # self.camera.set(cv.CAP_PROP_FPS, 30)
+        self.cameraFPS = 30
+        self.camera.set(cv.CAP_PROP_FPS, self.cameraFPS)
+
+        self.setCameraProp(cv.CAP_PROP_AUTO_EXPOSURE, -1)
         # self.camera.set(cv.CAP_PROP_AUTO_WB, 0)
-
-        # self.setCameraProp(cv.CAP_PROP_AUTO_EXPOSURE, 0)
-        self.setCameraProp(cv.CAP_PROP_EXPOSURE, -7)
-        self.setCameraProp(cv.CAP_PROP_BRIGHTNESS, 255)
-
-        # self.camera.set(cv.CAP_PROP_AUTO_EXPOSURE, 0)
-        # self.camera.set(cv.CAP_PROP_MONOCHROME, 0)
 
         print(self.getCameraInfo())
 
@@ -170,7 +253,7 @@ class Touchpad:
         self.fingers:list[Finger] = []
 
         # Configure filters
-        # TODO: Make theseSldiers?
+        # TODO: Make these sliders?
         self.ellipseIterations = 2
         self.ellipseKernelSize = (5, 5)
         self.ellipseKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, self.ellipseKernelSize)
@@ -181,31 +264,17 @@ class Touchpad:
 
         # create windows
         self.windowName = windowName if windowName is not None else f"Touchpad: {cameraPort}"
-        self.propertiesWindowsName = self.windowName + " - Properties"
+        self.propertiesWindowName = self.windowName + " - Properties"
         cv.namedWindow(self.windowName, cv.WINDOW_NORMAL|cv.WINDOW_KEEPRATIO)
-        cv.namedWindow(self.propertiesWindowsName, cv.WINDOW_AUTOSIZE)
-
-        # create sliders
+        cv.namedWindow(self.propertiesWindowName, cv.WINDOW_NORMAL|cv.WINDOW_KEEPRATIO)
+        
         targetRGB = np.uint8([[[210, 203, 227 ]]])
         self.targetHSVColor = cv.cvtColor( np.uint8(targetRGB),cv.COLOR_RGB2HSV).reshape(3)
-        self.targetHSVTolerance = [100, 100, 140]
-        # self.targetHSVTolerance = [50, 50, 50]
+        self.targetHSVTolerance = [100, 100, 150]
 
-        self.hSlider = MinMaxSlider("h", self.propertiesWindowsName, 
-            defaultMinValue = clamp(self.targetHSVColor[0] - self.targetHSVTolerance[0], 0, 255), 
-            defaultMaxValue = clamp(self.targetHSVColor[0] + self.targetHSVTolerance[0], 0, 255)
-        )
+        # create sliders
+        self.sliders = self.Sliders(self)
 
-        self.sSlider = MinMaxSlider("s", self.propertiesWindowsName, 
-            defaultMinValue = clamp(self.targetHSVColor[1] - self.targetHSVTolerance[1], 0, 255), 
-            defaultMaxValue = clamp(self.targetHSVColor[1] + self.targetHSVTolerance[1], 0, 255)
-        )
-
-        self.vSlider = MinMaxSlider("v", self.propertiesWindowsName, 
-            defaultMinValue = clamp(self.targetHSVColor[2] - self.targetHSVTolerance[2], 0, 255), 
-            defaultMaxValue = clamp(self.targetHSVColor[2] + self.targetHSVTolerance[2], 0, 255)
-        )
-        
     def setCameraProp(self, property:int, value:int):
 
         # Note: Hack to get camera properties to apply
@@ -219,13 +288,10 @@ class Touchpad:
         self.camera.set(property, value)
         self.camera.read()
         cv.waitKey(100)
-        
-        # while(self.camera.get(property) != value):
-
 
     def __bool__(self):
         return cv.getWindowProperty(self.windowName, cv.WND_PROP_VISIBLE) == 1 and \
-               cv.getWindowProperty(self.propertiesWindowsName, cv.WND_PROP_VISIBLE) == 1
+               cv.getWindowProperty(self.propertiesWindowName, cv.WND_PROP_VISIBLE) == 1
 
     def getCameraInfo(self):
         props = [
@@ -270,8 +336,8 @@ class Touchpad:
 
         # Compute layout of image grid 
         numImages = len(self.renderImages)
-        numXImages = int(math.ceil(np.sqrt(numImages)))
-        numYImages = int(math.ceil(numImages/numXImages))
+        numXImages = max(1, int(math.ceil(np.sqrt(numImages))))
+        numYImages = max(1, int(math.ceil(numImages/numXImages)))
 
         maxImageWidth  = int(windowWidth/numXImages)
         maxImageHeight = int(windowHeight/numYImages)
@@ -312,7 +378,6 @@ class Touchpad:
 
             windowImage[y:y+imageHeight, x:x+imageWidth] = resizedImage 
 
-        
         # Display window image buffer
         # Note: We need to pause via waitKey to allow opencv to display frame
         cv.imshow(self.windowName, windowImage)
@@ -321,18 +386,24 @@ class Touchpad:
 
     def getMinHSV(self):
         return (
-            self.hSlider.getMinValue(),
-            self.sSlider.getMinValue(),
-            self.vSlider.getMinValue()
+            self.sliders.hue.getMinValue(),
+            self.sliders.saturation.getMinValue(),
+            self.sliders.value.getMinValue()
         )
 
 
     def getMaxHSV(self):
         return (
-            self.hSlider.getMaxValue(),
-            self.sSlider.getMaxValue(),
-            self.vSlider.getMaxValue()
+            self.sliders.hue.getMaxValue(),
+            self.sliders.saturation.getMaxValue(),
+            self.sliders.value.getMaxValue()
         ) 
+
+    # Note: appends render image if current render level is greater than or equal to `minRenderLevel`
+    def addRenderImage(self, image:NamedImage, minRenderLevel:int):
+
+        if self.sliders.renderLevel.getValue() >= minRenderLevel:
+            self.renderImages.append(image)
 
     def update(self):
         
@@ -341,10 +412,10 @@ class Touchpad:
         self.renderImages.clear()
 
         self.frameId+= 1 
-        _, rawFrame = self.camera.read()
+        _, rawPixels = self.camera.read()
         
-        rawImage = NamedImage("Raw", rawFrame)
-        self.renderImages.append(rawImage)
+        rawImage = NamedImage("Raw", rawPixels)
+        self.addRenderImage(rawImage, self.RenderLevel.Minimal)
         
         # TODO: Rename this to something better
         self.fitEllipse(rawImage)
@@ -378,11 +449,11 @@ class Touchpad:
 
         # Note: OPEN is erosion followed by dilation (AKA standard denoise)
         denoisedImage = cv.morphologyEx(image, cv.MORPH_OPEN, self.denoiseKernel, iterations=self.denoiseIterations)
-        self.renderImages.append(NamedImage("Denoised", denoisedImage))
+        self.addRenderImage(NamedImage("Denoised", denoisedImage), self.RenderLevel.Internal)
 
         # Note: closing is dilation followed by erosion
         closedImage = cv.morphologyEx(denoisedImage, cv.MORPH_CLOSE, self.denoiseKernel, iterations=self.denoiseIterations)
-        self.renderImages.append(NamedImage("Closed", closedImage))
+        self.addRenderImage(NamedImage("Closed", closedImage), self.RenderLevel.Internal)
 
         boundedImage = cv.inRange(closedImage, colorLower, colorUpper)
 
@@ -391,26 +462,25 @@ class Touchpad:
     def fitEllipse(self, namedImage:NamedImage):
         
         hsvImage = cv.cvtColor(namedImage.pixels, cv.COLOR_BGR2HSV)
-        self.renderImages.append(NamedImage("HSV", hsvImage))
+        self.addRenderImage(NamedImage("HSV", hsvImage), self.RenderLevel.Debug)
 
         hsvMask = self.getMask(hsvImage, self.getMinHSV(), self.getMaxHSV())
-        self.renderImages.append(NamedImage("MASK", hsvMask))
+        self.addRenderImage(NamedImage("MASK", hsvMask), self.RenderLevel.Internal)
 
         # Preform a gradient on the mask to form 'rings' around fingers
         gradientEllipse = cv.morphologyEx(hsvMask, cv.MORPH_GRADIENT, self.ellipseKernel, self.ellipseIterations)
-        self.renderImages.append(NamedImage("GRADIENT", gradientEllipse))
+        self.addRenderImage(NamedImage("GRADIENT", gradientEllipse), self.RenderLevel.Debug)
     
         contours, hierarchies = cv.findContours(gradientEllipse, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
         if hierarchies is None:
             return
 
-        # TODO: Make these sliders!
-        minArea = 200
-        maxArea = 3000
-        minDiameter = 5
-        maxDiameter = 300
-        maxRadiusAspect = 3
-        maxNormalizedEllipseError = .30
+        minArea = self.sliders.area.getMinValue()
+        maxArea = self.sliders.area.getMaxValue()
+        minDiameter = self.sliders.diameter.getMinValue()
+        maxDiameter = self.sliders.diameter.getMaxValue()
+        maxRadiusAspect = self.sliders.maxRadiusAspect.getValue()
+        maxNormalizedEllipseError = self.sliders.maxNormalizedEllipseErrorPercent.getValue()/100
 
         # Draw all contours in red (we'll draw over the good ones with green below)
         cv.drawContours(namedImage.pixels, contours, -1, color=Color.red)
@@ -450,6 +520,7 @@ class Touchpad:
             ellipseArea = math.pi*d1*d2/4
             normalizedEllipseError = (ellipseArea - contourArea) / ellipseArea            
 
+            # TODO: Also make sure that parent contour is also elliptical!
             if abs(normalizedEllipseError) > maxNormalizedEllipseError:
                 log(f"IGNORING - normalizedEllipseError: {normalizedEllipseError} | ellipseArea: {ellipseArea} | contourArea: {contourArea}")
                 continue
@@ -458,7 +529,6 @@ class Touchpad:
             cv.ellipse(namedImage.pixels, ellipse, Color.green, 2)        
             namedImage.drawText(f"[{np.round(xc, 2)}, {np.round(yc, 2)}]", (xc, yc))
 
-            # TODO: Write out textFile
             normalizedX = normalize(xc, 0, self.cameraWidth, -1, 1)
             normalizedY = normalize(yc, 0, self.cameraHeight, -1, 1)
             self.fingers.append(Finger(normalizedX, normalizedY, d1, d2))
