@@ -137,8 +137,17 @@ class Finger:
         self.d1 = d1
         self.d2 = d2
 
+    def correctY(self, y):
+        ret = y * 2
+        if ret > 1:
+            return 1
+        elif ret < -1:
+            return -1
+        else:
+            return ret
+
     def __str__(self) -> str:
-        return f"x: {self.x} y: {self.y} d1: {self.d1} d2: {self.d2}"
+        return f"x: {self.x} y: {self.correctY(self.y)} d1: {self.d1} d2: {self.d2}"
 class Touchpad:
     
     class RenderLevel:
