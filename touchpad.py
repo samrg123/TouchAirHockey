@@ -131,13 +131,17 @@ class MinMaxSlider:
         return self.maxSlider.getValue()        
 
 class Finger:
-    def __init__(self, x, y, d1, d2) -> None:
+    def __init__(self, x, y, d1, d2, angle) -> None:
         self.x = x
         self.y = y
         self.d1 = d1
         self.d2 = d2
+        self.angle = angle
 
     def __str__(self) -> str:
+
+        # TODO: replace d1, d2 with width/height and add angle
+        #       Make sure this doesn't break loren's airhockey code!
         return f"x: {self.x} y: {self.y} d1: {self.d1} d2: {self.d2}"
 class Touchpad:
     
@@ -459,11 +463,59 @@ class Touchpad:
 
         return boundedImage
         
+    # Returns the ellipse that fits the contour and satisfies the current constraints or None if no ellipse if found
+    def getConstrainedEllipse(self, contour):
+
+        # Note: opencv requires at least 5 vertices to fit ellipse
+        if len(contour) < 5:
+            return None
+
+        # Ignore obvious small or giant splotches
+        minArea = self.sliders.area.getMinValue()
+        maxArea = self.sliders.area.getMaxValue()
+        contourArea = cv.contourArea(contour)
+        if not inRange(contourArea, minArea, maxArea):
+            return None 
+
+        ellipse = cv.fitEllipse(contour)
+        (x, y), (d1, d2), angle = ellipse
+
+        # TODO: Make sure that x, y is inbounds of clipping rect!
+
+        # Make sure the ellipse isn't to small/big
+        minDiameter = self.sliders.diameter.getMinValue()
+        maxDiameter = self.sliders.diameter.getMaxValue()        
+        if not (inRange(d1, minDiameter, maxDiameter) and 
+                inRange(d2, minDiameter, maxDiameter)):
+            return None 
+
+        # Make sure the ellipse isn't to stretched 
+        aspectRatio = np.abs(d1/d2)
+        maxRadiusAspect = self.sliders.maxRadiusAspect.getValue()
+        if not inRange(aspectRatio, 1/maxRadiusAspect, maxRadiusAspect):
+            return None
+
+        # Make sure the fit ellipse is actually approximates a decent ellipse
+        # Note: ellipse area is pi*r1*r2
+        ellipseArea = math.pi*d1*d2/4
+        normalizedEllipseError = (ellipseArea - contourArea) / ellipseArea
+
+        maxNormalizedEllipseError = self.sliders.maxNormalizedEllipseErrorPercent.getValue()/100
+        if abs(normalizedEllipseError) > maxNormalizedEllipseError:
+            log(f"IGNORING - normalizedEllipseError: {normalizedEllipseError} | ellipseArea: {ellipseArea} | contourArea: {contourArea}")
+            return None
+
+        # Bingo - we got a good ellipse!
+        log(f"ELLIPSE: diameter: [{d1}, {d2}] | AspectRatio: {aspectRatio} | contourArea: {contourArea} | ellipseArea: {ellipseArea} | error: {normalizedEllipseError}")
+        return ellipse
+
     def fitEllipse(self, namedImage:NamedImage):
-        
+
+        # Convert image to HSV
         hsvImage = cv.cvtColor(namedImage.pixels, cv.COLOR_BGR2HSV)
         self.addRenderImage(NamedImage("HSV", hsvImage), self.RenderLevel.Debug)
 
+        # Get image binary mask
         hsvMask = self.getMask(hsvImage, self.getMinHSV(), self.getMaxHSV())
         self.addRenderImage(NamedImage("MASK", hsvMask), self.RenderLevel.Internal)
 
@@ -475,64 +527,34 @@ class Touchpad:
         if hierarchies is None:
             return
 
-        minArea = self.sliders.area.getMinValue()
-        maxArea = self.sliders.area.getMaxValue()
-        minDiameter = self.sliders.diameter.getMinValue()
-        maxDiameter = self.sliders.diameter.getMaxValue()
-        maxRadiusAspect = self.sliders.maxRadiusAspect.getValue()
-        maxNormalizedEllipseError = self.sliders.maxNormalizedEllipseErrorPercent.getValue()/100
-
-        # Draw all contours in red (we'll draw over the good ones with green below)
+        # Draw all contours in red (we'll draw over the good ones with green when we detect a finger)
         cv.drawContours(namedImage.pixels, contours, -1, color=Color.red)
 
-        for contour, hierarchy in zip(contours, hierarchies[0]):
+        for i, (contour, hierarchy) in enumerate(zip(contours, hierarchies[0])):
 
             nextContour, prevContour, childContour, parentContour = hierarchy
 
-            # we only care about holes
+            # we only care about the inner hole of a ring
             if childContour != -1:
                 continue
 
-            # Note: opencv requires at least 5 vertices to fit ellipse
-            if len(contour) < 5:
+            fingerEllipse = self.getConstrainedEllipse(contour) 
+            if fingerEllipse is None:
                 continue
 
-            # Ignore obvious small or giant splotches
-            contourArea = cv.contourArea(contour)
-            if not inRange(contourArea, minArea, maxArea):
-                continue 
-        
-            ellipse = cv.fitEllipse(contour)
-            (xc,yc), (d1,d2), angle = ellipse
+            # TODO: Also make sure that parent contour is matches all constraints!
+            # if parentContour
 
-            # Make sure the ellipse isn't to small/big 
-            if not (inRange(d1, minDiameter, maxDiameter) and 
-                    inRange(d2, minDiameter, maxDiameter)):
-                continue 
+            (fingerX, fingerY), (fingerWidth, fingerHeight), fingerAngle = fingerEllipse
 
-            # Make sure the ellipse isn't to stretched 
-            aspectRatio = np.abs(d1/d2)
-            if not inRange(aspectRatio, 1/maxRadiusAspect, maxRadiusAspect):
-                continue
+            # Draw ellipse on image
+            cv.ellipse(namedImage.pixels, fingerEllipse, Color.green, 2)        
+            namedImage.drawText(f"[{np.round(fingerX, 2)}, {np.round(fingerY, 2)}]", (fingerX, fingerY))
 
-            # Make sure the fit ellipse is actually approximates a decent ellipse
-            # Note: ellipse area is pi*r1*r2
-            ellipseArea = math.pi*d1*d2/4
-            normalizedEllipseError = (ellipseArea - contourArea) / ellipseArea            
-
-            # TODO: Also make sure that parent contour is also elliptical!
-            if abs(normalizedEllipseError) > maxNormalizedEllipseError:
-                log(f"IGNORING - normalizedEllipseError: {normalizedEllipseError} | ellipseArea: {ellipseArea} | contourArea: {contourArea}")
-                continue
-
-            # Bingo - we got a finger!
-            cv.ellipse(namedImage.pixels, ellipse, Color.green, 2)        
-            namedImage.drawText(f"[{np.round(xc, 2)}, {np.round(yc, 2)}]", (xc, yc))
-
-            normalizedX = normalize(xc, 0, self.cameraWidth, -1, 1)
-            normalizedY = normalize(yc, 0, self.cameraHeight, -1, 1)
-            self.fingers.append(Finger(normalizedX, normalizedY, d1, d2))
-            log(f"FINGER: diameter: [{d1}, {d2}] | AspectRatio: {aspectRatio} | contourArea: {contourArea} | ellipseArea: {ellipseArea} | error: {normalizedEllipseError}")
+            # Normalize finger coordinates and add to queue
+            normalizedX = normalize(fingerX, 0, self.cameraWidth, -1, 1)
+            normalizedY = normalize(fingerY, 0, self.cameraHeight, -1, 1)
+            self.fingers.append(Finger(normalizedX, normalizedY, fingerWidth, fingerHeight, fingerAngle))
 
 
 def main():
