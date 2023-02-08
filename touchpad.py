@@ -138,11 +138,22 @@ class Finger:
         self.d2 = d2
         self.angle = angle
 
+    # TODO: This is a hack to get things working, we really want to use a
+    #       a clipping rectangle and transform coordinates to that
+    def correctY(self, y):
+        ret = y * 2
+        if ret > 1:
+            return 1
+        elif ret < -1:
+            return -1
+        else:
+            return ret
+
     def __str__(self) -> str:
 
         # TODO: replace d1, d2 with width/height and add angle
         #       Make sure this doesn't break loren's airhockey code!
-        return f"x: {self.x} y: {self.y} d1: {self.d1} d2: {self.d2}"
+        return f"x: {self.x} y: {self.correctY(self.y)} d1: {self.d1} d2: {self.d2}"
 class Touchpad:
     
     class RenderLevel:
